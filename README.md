@@ -1,0 +1,1 @@
+Supports large models that access any API type, and provides an example of opening a local application
