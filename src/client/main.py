@@ -25,6 +25,7 @@ class Configuration:
         self.load_env()
         self.api_key = os.getenv("API_KEY")
         self.api_point = os.getenv("API_POINT")
+        self.model = os.getenv("MODEL")
 
     @staticmethod
     def load_env() -> None:
@@ -75,6 +76,20 @@ class Configuration:
         if not self.api_point:
             raise ValueError("LLM_API_POINT not found in environment variables")
         return self.api_point
+
+    @property
+    def llm_model(self) -> str:
+        """Get the LLM MODEL point.
+
+        Returns:
+            The API MODEL as a string.
+
+        Raises:
+            ValueError: If the API MODEL is not found in environment variables.
+        """
+        if not self.model:
+            raise ValueError("LLM_MODEL not found in environment variables")
+        return self.model
 
 
 class Server:
@@ -235,9 +250,10 @@ Arguments:
 class LLMClient:
     """Manages communication with the LLM provider."""
 
-    def __init__(self, api_point: str, api_key: str) -> None:
+    def __init__(self, api_point: str, api_key: str, model: str) -> None:
         self.api_key: str = api_key
         self.api_point: str = api_point
+        self.model: str = model
 
     def get_response(self, messages: list[dict[str, str]]) -> str:
         """Get a response from the LLM.
@@ -251,22 +267,6 @@ class LLMClient:
         Raises:
             httpx.RequestError: If the request to the LLM fails.
         """
-        # url = "https://api.groq.com/openai/v1/chat/completions"
-        #
-        # headers = {
-        #     "Content-Type": "application/json",
-        #     "Authorization": f"Bearer {self.api_key}",
-        # }
-        # payload = {
-        #     "messages": messages,
-        #     "model": "llama-3.2-90b-vision-preview",
-        #     "temperature": 0.7,
-        #     "max_tokens": 4096,
-        #     "top_p": 1,
-        #     "stream": False,
-        #     "stop": None,
-        # }
-
         # API端点和密钥
         url = self.api_point
 
@@ -278,7 +278,7 @@ class LLMClient:
 
         payload = {
             "messages": messages,
-            "model": "Qwen2_5-72B-Instruct",
+            "model": self.model,
             "temperature": 0.7,
             "max_tokens": 4096,
             "top_p": 1,
@@ -456,7 +456,7 @@ async def main() -> None:
         Server(name, srv_config)
         for name, srv_config in server_config["mcpServers"].items()
     ]
-    llm_client = LLMClient(config.llm_api_point, config.llm_api_key)
+    llm_client = LLMClient(config.llm_api_point, config.llm_api_key, config.llm_model)
     chat_session = ChatSession(servers, llm_client)
     await chat_session.start()
 
