@@ -496,8 +496,6 @@ async def chat(request: ChatRequest):
         session.messages.append(
             {"role": "user", "content": request.message})
         chatSession = session.chat_session
-        # 这里可以添加实际的AI处理逻辑
-        # 目前返回模拟响应
         llm_response = chatSession.llm_client.get_response(session.messages)
         logging.info("\nAssistant: %s", llm_response)
 
