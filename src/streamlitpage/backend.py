@@ -1,10 +1,15 @@
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import List, Optional
+import uvicorn
+from datetime import datetime
 import streamlit as st
 import asyncio
 import json
 import logging
 import os
 import shutil
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
 import httpx
@@ -189,15 +194,26 @@ class Server:
         attempt = 0
         while attempt < retries:
             try:
-                logging.info(f"Executing {tool_name}...")
-                result = await self.session.call_tool(tool_name, arguments)
+                logging.info(f"Starting execution of tool: {tool_name}")
+                logging.info(f"Tool arguments: {arguments}")
+                logging.info(f"Current attempt: {attempt + 1}/{retries}")
 
+                # 记录调用前的状态
+                logging.info(
+                    f"Server {self.name} session state: {self.session is not None}")
+
+                result = await self.session.call_tool(tool_name, arguments)
+                logging.info(f"Tool execution completed successfully")
                 return result
 
             except Exception as e:
                 attempt += 1
+                logging.error(f"Error executing tool: {str(e)}")
+                logging.error(f"Error type: {type(e).__name__}")
+                logging.error(f"Error details: {e}")
                 logging.warning(
-                    f"Error executing tool: {e}. Attempt {attempt} of {retries}."
+                    f"Attempt {attempt} of {retries} failed. "
+                    f"Waiting {delay} seconds before retry..."
                 )
                 if attempt < retries:
                     await asyncio.sleep(delay)
@@ -297,6 +313,7 @@ class LLMClient:
                 response = client.post(url, headers=headers, json=payload)
                 response.raise_for_status()
                 data = response.json()
+                logging.info(f"LLM response: {data}")
                 return data["choices"][0]["message"]["content"]
 
         except httpx.RequestError as e:
@@ -320,6 +337,9 @@ class ChatSession:
     def __init__(self, servers: list[Server], llm_client: LLMClient) -> None:
         self.servers: list[Server] = servers
         self.llm_client: LLMClient = llm_client
+        # 初始化session state来存储消息历史
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
 
     async def cleanup_servers(self) -> None:
         """Clean up all servers properly."""
@@ -352,18 +372,11 @@ class ChatSession:
 
                 for server in self.servers:
                     tools = await server.list_tools()
-                    logging.info(
-                        f"Available tools: {[tool.name for tool in tools]}")
-
                     if any(tool.name == tool_call["tool"] for tool in tools):
                         try:
-                            logging.info(
-                                f"Found matching tool on server {server.name}")
                             result = await server.execute_tool(
                                 tool_call["tool"], tool_call["arguments"]
                             )
-                            logging.info(
-                                f"Tool execution completed with result: {result}")
 
                             if isinstance(result, dict) and "progress" in result:
                                 progress = result["progress"]
@@ -385,86 +398,62 @@ class ChatSession:
         except json.JSONDecodeError:
             return llm_response
 
-    async def start(self) -> None:
+    async def start(self) -> dict[str, Any]:
         """Main chat session handler."""
-        try:
-            for server in self.servers:
-                try:
-                    await server.initialize()
-                except Exception as e:
-                    logging.error(f"Failed to initialize server: {e}")
-                    await self.cleanup_servers()
-                    return
+        for server in self.servers:
+            try:
+                await server.initialize()
+            except Exception as e:
+                logging.error(f"Failed to initialize server: {e}")
+                await self.cleanup_servers()
+                return
 
-            all_tools = []
-            for server in self.servers:
-                tools = await server.list_tools()
-                all_tools.extend(tools)
+        all_tools = []
+        for server in self.servers:
+            tools = await server.list_tools()
+            all_tools.extend(tools)
 
-            tools_description = "\n".join(
-                [tool.format_for_llm() for tool in all_tools])
+        tools_description = "\n".join(
+            [tool.format_for_llm() for tool in all_tools])
 
-            system_message = (
-                "You are a helpful assistant with access to these tools:\n\n"
-                f"{tools_description}\n"
-                "Choose the appropriate tool based on the user's question. "
-                "If no tool is needed, reply directly.\n\n"
-                "IMPORTANT: When you need to use a tool, you must ONLY respond with "
-                "the exact JSON object format below, nothing else:\n"
-                "{\n"
-                '    "tool": "tool-name",\n'
-                '    "arguments": {\n'
-                '        "argument-name": "value"\n'
-                "    }\n"
-                "}\n\n"
-                "After receiving a tool's response:\n"
-                "1. Transform the raw data into a natural, conversational response\n"
-                "2. Keep responses concise but informative\n"
-                "3. Focus on the most relevant information\n"
-                "4. Use appropriate context from the user's question\n"
-                "5. Avoid simply repeating the raw data\n\n"
-                "Please use only the tools that are explicitly defined above."
-            )
-            messages = [{"role": "system", "content": system_message}]
+        system_message = (
+            "You are a helpful assistant with access to these tools:\n\n"
+            f"{tools_description}\n"
+            "Choose the appropriate tool based on the user's question. "
+            "If no tool is needed, reply directly.\n\n"
+            "IMPORTANT: When you need to use a tool, you must ONLY respond with "
+            "the exact JSON object format below, nothing else:\n"
+            "{\n"
+            '    "tool": "tool-name",\n'
+            '    "arguments": {\n'
+            '        "argument-name": "value"\n'
+            "    }\n"
+            "}\n\n"
+            "After receiving a tool's response:\n"
+            "1. Transform the raw data into a natural, conversational response\n"
+            "2. Keep responses concise but informative\n"
+            "3. Focus on the most relevant information\n"
+            "4. Use appropriate context from the user's question\n"
+            "5. Avoid simply repeating the raw data\n\n"
+            "Please use only the tools that are explicitly defined above."
+        )
+        messages = [{"role": "system", "content": system_message}]
 
-            while True:
-                try:
-                    user_input = input("You: ").strip().lower()
-                    if user_input in ["quit", "exit"]:
-                        logging.info("\nExiting...")
-                        break
-
-                    messages.append({"role": "user", "content": user_input})
-
-                    llm_response = self.llm_client.get_response(messages)
-                    logging.info("\nAssistant: %s", llm_response)
-
-                    result = await self.process_llm_response(llm_response)
-
-                    if result != llm_response:
-                        messages.append(
-                            {"role": "assistant", "content": llm_response})
-                        messages.append({"role": "system", "content": result})
-
-                        final_response = self.llm_client.get_response(messages)
-                        logging.info("\nFinal response: %s", final_response)
-                        messages.append(
-                            {"role": "assistant", "content": final_response}
-                        )
-                    else:
-                        messages.append(
-                            {"role": "assistant", "content": llm_response})
-
-                except KeyboardInterrupt:
-                    logging.info("\nExiting...")
-                    break
-
-        finally:
-            await self.cleanup_servers()
+        return messages
 
 
-async def main() -> None:
-    """Initialize and run the chat session."""
+class Session:
+    def __init__(self) -> None:
+        self.messages: list[dict[str, Any]] = []
+        self.chat_session: ChatSession | None = None
+
+
+session = Session()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动时执行
     config = Configuration()
     server_config = config.load_config("servers_config.json")
     servers = [
@@ -474,8 +463,69 @@ async def main() -> None:
     llm_client = LLMClient(config.llm_api_point,
                            config.llm_api_key, config.llm_model)
     chat_session = ChatSession(servers, llm_client)
-    await chat_session.start()
+    messages = await chat_session.start()
 
+    session.messages = messages
+    session.chat_session = chat_session
+    yield
+    # 关闭时执行
+    await chat_session.cleanup_servers()
+
+app = FastAPI(lifespan=lifespan)
+
+
+class Message(BaseModel):
+    role: str
+    content: str
+    timestamp: Optional[str] = None
+
+
+class ChatRequest(BaseModel):
+    message: str
+
+
+class ChatResponse(BaseModel):
+    response: str
+    timestamp: str
+
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    try:
+        logging.info("\nUser: %s", session.messages)
+        session.messages.append(
+            {"role": "user", "content": request.message})
+        chatSession = session.chat_session
+        # 这里可以添加实际的AI处理逻辑
+        # 目前返回模拟响应
+        llm_response = chatSession.llm_client.get_response(session.messages)
+        logging.info("\nAssistant: %s", llm_response)
+
+        result = await chatSession.process_llm_response(llm_response)
+
+        response = llm_response
+        if result != llm_response:
+            session.messages.append(
+                {"role": "assistant", "content": llm_response})
+            session.messages.append({"role": "system", "content": result})
+
+            final_response = chatSession.llm_client.get_response(
+                session.messages)
+            logging.info("\nFinal response: %s", final_response)
+            session.messages.append(
+                {"role": "assistant", "content": final_response}
+            )
+            response = final_response
+        else:
+            session.messages.append(
+                {"role": "assistant", "content": llm_response})
+
+        return ChatResponse(
+            response=response,
+            timestamp=datetime.now().strftime("%H:%M:%S")
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    uvicorn.run(app, host="0.0.0.0", port=8000)

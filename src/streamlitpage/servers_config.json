@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "rpa": {
+        "command": "uv",
+        "args": ["run", "D:\\study\\mcp\\mcp-client-llm\\src\\server\\rpa.py"],
+        "env": null
+    }
+  }
+}
